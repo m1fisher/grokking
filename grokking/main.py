@@ -16,13 +16,16 @@ import matplotlib.pyplot as plt
 from grokking.data import make_dataset
 from grokking.model import MLP
 from grokking.train import train
+from grokking.rfm import train_rfm
 from grokking.analysis import extract_weights, fft_iprs_and_ginis, compute_norms
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Grokking modular arithmetic")
+    parser.add_argument("--model", type=str, default="mlp", choices=["mlp", "rfm"],
+                        help="Model type: mlp or rfm (Recursive Feature Machine)")
     parser.add_argument("--p", type=int, default=97, help="Prime modulus")
-    parser.add_argument("--hidden", type=int, default=500, help="Hidden layer width")
+    parser.add_argument("--hidden", type=int, default=500, help="Hidden layer width (mlp only)")
     parser.add_argument("--data-frac", type=float, default=0.5, help="Training data fraction")
     parser.add_argument("--noise-level", type=float, default=0.0, help="Label noise fraction")
     parser.add_argument("--operation", type=str, default="addition", choices=["addition", "multiplication"])
@@ -41,6 +44,10 @@ def parse_args():
     parser.add_argument("--early-stop", type=int, default=0,
                         help="Stop after N consecutive log points with test_acc=1.0 (0 = off)")
     parser.add_argument("--log-every", type=int, default=10, help="Log metrics every N epochs")
+    # RFM-specific
+    parser.add_argument("--rfm-iters", type=int, default=50, help="RFM iterations (rfm only)")
+    parser.add_argument("--bandwidth", type=float, default=2.5, help="Gaussian kernel bandwidth (rfm only)")
+    parser.add_argument("--ridge", type=float, default=0.0, help="Ridge regularization (rfm only)")
     parser.add_argument("--seed", type=int, default=1, help="Model init seed")
     parser.add_argument("--pair-seed", type=int, default=420, help="Train/test split seed")
     parser.add_argument("--device", type=str, default="auto", help="Device: cpu, cuda, or auto")
@@ -173,6 +180,96 @@ def setup_logging(out_dir: str):
     builtins.print = _log_print
 
 
+def run_mlp(args, dataset, device):
+    torch.manual_seed(args.seed)
+    model = MLP(
+        2 * args.p, args.hidden, args.p,
+        depth=args.depth, activation=args.activation, dropout=args.dropout,
+    )
+    model.to(device)
+    print(f"Model: MLP depth={args.depth}, activation={args.activation}, "
+          f"{sum(p.numel() for p in model.parameters())} parameters")
+
+    if args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.wd,
+            betas=(0.9, 0.98), eps=1e-8,
+        )
+    else:
+        optimizer = torch.optim.SGD(
+            model.parameters(), lr=args.lr, weight_decay=args.wd,
+        )
+
+    weight_snapshots = []
+
+    def on_log(model, epoch):
+        w = extract_weights(model)
+        weight_snapshots.append({
+            "norms": compute_norms(w),
+            "fft": fft_iprs_and_ginis(w),
+        })
+
+    history = train(
+        model, optimizer, dataset,
+        epochs=args.epochs, log_every=args.log_every,
+        loss_fn=args.loss, batch_size=args.batch_size,
+        early_stop_patience=args.early_stop,
+        device=device, on_log=on_log,
+    )
+    return history, weight_snapshots
+
+
+def run_rfm(args, dataset):
+    print(f"Model: RFM (Gaussian kernel, bandwidth={args.bandwidth}, ridge={args.ridge})")
+    # RFM needs CPU float64 data
+    cpu_dataset = make_dataset(
+        p=args.p, data_frac=args.data_frac, noise_level=args.noise_level,
+        operation=args.operation, pair_seed=args.pair_seed,
+        device=torch.device("cpu"),
+    )
+    history = train_rfm(
+        cpu_dataset, iters=args.rfm_iters, bandwidth=args.bandwidth,
+        ridge=args.ridge, early_stop_patience=args.early_stop,
+    )
+    history["epoch"] = history.pop("iter")
+    return history, []
+
+
+def save_basic_plots(history: dict, out_dir: str):
+    """Loss/accuracy plots (no weight analysis)."""
+    os.makedirs(out_dir, exist_ok=True)
+    x = np.array(history["epoch"])
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4))
+    axes[0].set_title("Train / Test Loss")
+    axes[0].plot(x, history["train_loss"], label="train")
+    axes[0].plot(x, history["test_loss"], label="test")
+    axes[0].set_xlabel("iteration")
+    axes[0].set_ylabel("loss")
+    axes[0].legend()
+
+    axes[1].set_title("Train / Test Loss (log)")
+    axes[1].plot(x, history["train_loss"], label="train")
+    axes[1].plot(x, history["test_loss"], label="test")
+    axes[1].set_xlabel("iteration")
+    axes[1].set_ylabel("loss")
+    axes[1].set_yscale("log")
+    axes[1].legend()
+
+    axes[2].set_title("Train / Test Accuracy")
+    axes[2].plot(x, history["train_acc"], label="train")
+    axes[2].plot(x, history["test_acc"], label="test")
+    axes[2].axhline(y=1.0, color="black", linestyle="dashed")
+    axes[2].set_xlabel("iteration")
+    axes[2].set_ylabel("accuracy")
+    axes[2].legend()
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "losses_accuracies.png"), dpi=150)
+    plt.close(fig)
+    print(f"Plots saved to {out_dir}/")
+
+
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -208,42 +305,8 @@ def main():
         f"train={dataset['X_train'].shape[0]}, test={dataset['X_test'].shape[0]}"
     )
 
-    torch.manual_seed(args.seed)
-    model = MLP(
-        2 * args.p, args.hidden, args.p,
-        depth=args.depth, activation=args.activation, dropout=args.dropout,
-    )
-    model.to(device)
-    print(f"Model: depth={args.depth}, activation={args.activation}, "
-          f"{sum(p.numel() for p in model.parameters())} parameters")
-
-    if args.optimizer == "adamw":
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=args.lr, weight_decay=args.wd,
-            betas=(0.9, 0.98), eps=1e-8,
-        )
-    else:
-        optimizer = torch.optim.SGD(
-            model.parameters(), lr=args.lr, weight_decay=args.wd,
-        )
-
-    # Collect weight snapshots during training via callback
-    weight_snapshots = []
-
-    def on_log(model, epoch):
-        w = extract_weights(model)
-        weight_snapshots.append({
-            "norms": compute_norms(w),
-            "fft": fft_iprs_and_ginis(w),
-        })
-
-    history = train(
-        model, optimizer, dataset,
-        epochs=args.epochs, log_every=args.log_every,
-        loss_fn=args.loss, batch_size=args.batch_size,
-        early_stop_patience=args.early_stop,
-        device=device, on_log=on_log,
-    )
+    history, weight_snapshots = run_mlp(args, dataset, device) if args.model == "mlp" \
+        else run_rfm(args, dataset)
 
     # Save scalar history
     os.makedirs(args.out_dir, exist_ok=True)
@@ -251,8 +314,10 @@ def main():
         json.dump(history, f, indent=2)
     print(f"History saved to {args.out_dir}/history.json")
 
-    if not args.no_plots:
+    if not args.no_plots and weight_snapshots:
         save_plots(history, weight_snapshots, args, args.out_dir)
+    elif not args.no_plots:
+        save_basic_plots(history, args.out_dir)
 
     print(f"\nFinal train loss: {history['train_loss'][-1]:.6f}")
     print(f"Final test loss:  {history['test_loss'][-1]:.6f}")
