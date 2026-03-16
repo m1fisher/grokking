@@ -2,7 +2,10 @@
 
 import argparse
 import json
+import logging
 import os
+import subprocess
+import sys
 
 import numpy as np
 import torch
@@ -146,8 +149,49 @@ def save_plots(history: dict, weight_snapshots: list, args, out_dir: str):
     print(f"Plots saved to {out_dir}/")
 
 
+def setup_logging(out_dir: str):
+    """Log to both stdout and out_dir/run.log."""
+    os.makedirs(out_dir, exist_ok=True)
+    log_path = os.path.join(out_dir, "run.log")
+    # Root logger writes to file + stdout
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    fmt = logging.Formatter("%(message)s")
+    fh = logging.FileHandler(log_path, mode="w")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    # Redirect print() to logger
+    import builtins
+    _orig_print = builtins.print
+    def _log_print(*args, **kwargs):
+        msg = " ".join(str(a) for a in args)
+        logging.info(msg)
+    builtins.print = _log_print
+
+
 def main():
     args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # Save full command, git hash, and args
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        git_hash = "unknown"
+    with open(os.path.join(args.out_dir, "command.txt"), "w") as f:
+        f.write(f"git: {git_hash}\n")
+        f.write(" ".join(sys.argv) + "\n")
+    with open(os.path.join(args.out_dir, "args.json"), "w") as f:
+        json.dump(vars(args), f, indent=2)
+
+    setup_logging(args.out_dir)
+
     device = pick_device(args.device)
     print(f"Using device: {device}")
 
