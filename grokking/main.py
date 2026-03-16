@@ -27,17 +27,17 @@ def parse_args():
     parser.add_argument("--noise-level", type=float, default=0.0, help="Label noise fraction")
     parser.add_argument("--operation", type=str, default="addition", choices=["addition", "multiplication"])
     parser.add_argument("--epochs", type=int, default=1000, help="Training epochs")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--wd", type=float, default=15.0, help="Weight decay")
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "sgd"],
+    parser.add_argument("--lr", type=float, default=50.0, help="Learning rate")
+    parser.add_argument("--wd", type=float, default=0.0, help="Weight decay")
+    parser.add_argument("--optimizer", type=str, default="sgd", choices=["adamw", "sgd"],
                         help="Optimizer")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate")
     parser.add_argument("--loss", type=str, default="mse", choices=["mse", "ce"], help="Loss function")
     parser.add_argument("--depth", type=int, default=1, help="Number of hidden layers")
-    parser.add_argument("--activation", type=str, default="quadratic",
+    parser.add_argument("--activation", type=str, default="relu",
                         choices=["relu", "gelu", "tanh", "quadratic"],
                         help="Activation function")
-    parser.add_argument("--batch-size", type=int, default=0, help="Minibatch size (0 = full-batch)")
+    parser.add_argument("--batch-size", type=int, default=128, help="Minibatch size (0 = full-batch)")
     parser.add_argument("--early-stop", type=int, default=0,
                         help="Stop after N consecutive log points with test_acc=1.0 (0 = off)")
     parser.add_argument("--log-every", type=int, default=10, help="Log metrics every N epochs")
