@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from grokking.data import make_dataset, make_token_dataset
 from grokking.model import MLP
 from grokking.transformer import DecoderTransformer
+from grokking.transformer_original import OriginalGrokTransformer
 from grokking.train import train
 from grokking.rfm import train_rfm
 from grokking.analysis import extract_weights, fft_iprs_and_ginis, compute_norms
@@ -23,28 +24,33 @@ from grokking.analysis import extract_weights, fft_iprs_and_ginis, compute_norms
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Grokking modular arithmetic")
-    parser.add_argument("--model", type=str, default="mlp", choices=["mlp", "rfm", "transformer"],
-                        help="Model type: mlp, rfm, or transformer")
+    parser.add_argument("--model", type=str, default="mlp",
+                        choices=["mlp", "rfm", "transformer", "transformer-original"],
+                        help="Model type: mlp, rfm, transformer (pre-norm), or transformer-original (Power et al.)")
     parser.add_argument("--p", type=int, default=97, help="Prime modulus")
     parser.add_argument("--hidden", type=int, default=500, help="Hidden layer width (mlp only)")
     parser.add_argument("--data-frac", type=float, default=0.5, help="Training data fraction")
     parser.add_argument("--noise-level", type=float, default=0.0, help="Label noise fraction")
-    parser.add_argument("--operation", type=str, default="addition", choices=["addition", "multiplication"])
+    parser.add_argument("--operation", type=str, default="addition", choices=["addition", "multiplication", "division"])
     parser.add_argument("--epochs", type=int, default=1000, help="Training epochs")
     parser.add_argument("--lr", type=float, default=50.0, help="Learning rate")
     parser.add_argument("--wd", type=float, default=0.0, help="Weight decay")
-    parser.add_argument("--optimizer", type=str, default="sgd", choices=["adamw", "sgd"],
+    parser.add_argument("--optimizer", type=str, default="sgd", choices=["adam", "adamw", "sgd"],
                         help="Optimizer")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate")
     parser.add_argument("--loss", type=str, default="mse", choices=["mse", "ce"], help="Loss function")
     parser.add_argument("--depth", type=int, default=1, help="Number of hidden layers")
     parser.add_argument("--activation", type=str, default="relu",
-                        choices=["relu", "gelu", "tanh", "quadratic"],
+                        choices=["relu", "gelu", "silu", "tanh", "quadratic"],
                         help="Activation function")
     parser.add_argument("--batch-size", type=int, default=128, help="Minibatch size (0 = full-batch)")
+    parser.add_argument("--noise-mode", type=str, default="fixed",
+                        choices=["fixed", "per_epoch", "stratified"],
+                        help="fixed: noise set once; per_epoch: re-corrupt each epoch; stratified: balanced noise per batch")
     parser.add_argument("--early-stop", type=int, default=0,
                         help="Stop after N consecutive log points with test_acc=1.0 (0 = off)")
     parser.add_argument("--log-every", type=int, default=10, help="Log metrics every N epochs")
+    parser.add_argument("--warmup-steps", type=int, default=10, help="Linear LR warmup steps (transformer)")
     # RFM-specific
     parser.add_argument("--rfm-iters", type=int, default=50, help="RFM iterations (rfm only)")
     parser.add_argument("--bandwidth", type=float, default=2.5, help="Gaussian kernel bandwidth (rfm only)")
@@ -191,7 +197,12 @@ def run_mlp(args, dataset, device):
     print(f"Model: MLP depth={args.depth}, activation={args.activation}, "
           f"{sum(p.numel() for p in model.parameters())} parameters")
 
-    if args.optimizer == "adamw":
+    if args.optimizer == "adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=args.lr,
+            betas=(0.9, 0.98), eps=1e-8,
+        )
+    elif args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=args.lr, weight_decay=args.wd,
             betas=(0.9, 0.98), eps=1e-8,
@@ -215,6 +226,7 @@ def run_mlp(args, dataset, device):
         epochs=args.epochs, log_every=args.log_every,
         loss_fn=args.loss, batch_size=args.batch_size,
         early_stop_patience=args.early_stop,
+        noise_mode=args.noise_mode,
         device=device, on_log=on_log,
     )
     return history, weight_snapshots
@@ -247,17 +259,33 @@ def run_transformer(args, device):
     )
 
     torch.manual_seed(args.seed)
-    model = DecoderTransformer(
-        p=args.p, d_model=128, n_head=4, n_layer=2, dropout=args.dropout,
-    )
+    if args.model == "transformer-original":
+        model = OriginalGrokTransformer(
+            p=args.p, d_model=128, n_head=4, n_layer=2, dropout=args.dropout,
+        )
+        label = "Transformer-Original (Power et al.)"
+    else:
+        model = DecoderTransformer(
+            p=args.p, d_model=128, n_head=4, n_layer=2, dropout=args.dropout,
+        )
+        label = "Transformer (pre-norm)"
     model.to(device)
-    print(f"Model: Transformer, ~{model.n_non_emb_params} non-embedding parameters")
+    print(f"Model: {label}, ~{model.n_non_emb_params} non-embedding parameters")
 
-    # Original paper uses AdamW with lr=1e-3, betas=(0.9, 0.98), wd=1.0
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.wd,
-        betas=(0.9, 0.98), eps=1e-8,
-    )
+    if args.optimizer == "adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=args.lr,
+            betas=(0.9, 0.98), eps=1e-8,
+        )
+    elif args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.wd,
+            betas=(0.9, 0.98), eps=1e-8,
+        )
+    else:
+        optimizer = torch.optim.SGD(
+            model.parameters(), lr=args.lr, weight_decay=args.wd,
+        )
 
     # Transformer uses CE loss by default (classification over p tokens)
     loss_fn = args.loss
@@ -267,6 +295,7 @@ def run_transformer(args, device):
         epochs=args.epochs, log_every=args.log_every,
         loss_fn=loss_fn, batch_size=args.batch_size,
         early_stop_patience=args.early_stop,
+        warmup_steps=args.warmup_steps,
         device=device,
     )
     return history, []
@@ -329,7 +358,7 @@ def main():
     device = pick_device(args.device)
     print(f"Using device: {device}")
 
-    if args.model == "transformer":
+    if args.model in ("transformer", "transformer-original"):
         history, weight_snapshots = run_transformer(args, device)
     elif args.model == "rfm":
         history, weight_snapshots = run_rfm(args, None)

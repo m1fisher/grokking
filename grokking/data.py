@@ -31,15 +31,23 @@ def make_dataset(
     Returns:
         Dictionary with X_train, Y_train, X_test, Y_test, X_all, Y_all, p.
     """
-    if operation not in ("addition", "multiplication"):
+    if operation not in ("addition", "multiplication", "division"):
         raise ValueError(f"Unknown operation: {operation}")
 
-    pairs = [(i, j) for i in range(p) for j in range(p)]
+    if operation == "division":
+        # x / y mod p for y != 0 (multiply by modular inverse)
+        pairs = [(i, j) for i in range(p) for j in range(1, p)]
+    else:
+        pairs = [(i, j) for i in range(p) for j in range(p)]
     X_all = torch.tensor(pairs)
     if operation == "addition":
         Y_all = (X_all[:, 0] + X_all[:, 1]) % p
-    else:
+    elif operation == "multiplication":
         Y_all = (X_all[:, 0] * X_all[:, 1]) % p
+    else:
+        # division: x * y^(-1) mod p using Fermat's little theorem: y^(-1) = y^(p-2) mod p
+        inv = torch.tensor([pow(int(y), p - 2, p) for _, y in pairs])
+        Y_all = (X_all[:, 0] * inv) % p
 
     # One-hot encode: concat one_hot(i) and one_hot(j) -> 2p dims
     X_all_oh = F.one_hot(X_all, num_classes=p).to(dtype=dtype, device=device)
@@ -67,6 +75,7 @@ def make_dataset(
     return {
         "X_train": X_shuffled[:train_size],
         "Y_train": Y_noisy[:train_size],
+        "Y_train_clean": Y_shuffled[:train_size].clone(),
         "X_test": X_shuffled[train_size:],
         "Y_test": Y_noisy[train_size:],
         "X_all": X_all_oh,
@@ -91,18 +100,24 @@ def make_token_dataset(
 
     Returns same dict structure but X_train/X_test are (N, 4) long tensors.
     """
-    if operation not in ("addition", "multiplication"):
+    if operation not in ("addition", "multiplication", "division"):
         raise ValueError(f"Unknown operation: {operation}")
 
     op_token = p
     eq_token = p + 1
 
-    pairs = [(i, j) for i in range(p) for j in range(p)]
+    if operation == "division":
+        pairs = [(i, j) for i in range(p) for j in range(1, p)]
+    else:
+        pairs = [(i, j) for i in range(p) for j in range(p)]
     X_all = torch.tensor(pairs)
     if operation == "addition":
         Y_all = (X_all[:, 0] + X_all[:, 1]) % p
-    else:
+    elif operation == "multiplication":
         Y_all = (X_all[:, 0] * X_all[:, 1]) % p
+    else:
+        inv = torch.tensor([pow(int(y), p - 2, p) for _, y in pairs])
+        Y_all = (X_all[:, 0] * inv) % p
 
     # Token sequences: [a, op, b, =]
     N = len(pairs)

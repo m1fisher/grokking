@@ -8,6 +8,7 @@ import torch.nn as nn
 ACTIVATIONS = {
     "relu": nn.ReLU,
     "gelu": nn.GELU,
+    "silu": nn.SiLU,
     "tanh": nn.Tanh,
     "quadratic": None,  # handled manually
 }
