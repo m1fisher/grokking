@@ -13,8 +13,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from grokking.data import make_dataset
+from grokking.data import make_dataset, make_token_dataset
 from grokking.model import MLP
+from grokking.transformer import DecoderTransformer
 from grokking.train import train
 from grokking.rfm import train_rfm
 from grokking.analysis import extract_weights, fft_iprs_and_ginis, compute_norms
@@ -22,8 +23,8 @@ from grokking.analysis import extract_weights, fft_iprs_and_ginis, compute_norms
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Grokking modular arithmetic")
-    parser.add_argument("--model", type=str, default="mlp", choices=["mlp", "rfm"],
-                        help="Model type: mlp or rfm (Recursive Feature Machine)")
+    parser.add_argument("--model", type=str, default="mlp", choices=["mlp", "rfm", "transformer"],
+                        help="Model type: mlp, rfm, or transformer")
     parser.add_argument("--p", type=int, default=97, help="Prime modulus")
     parser.add_argument("--hidden", type=int, default=500, help="Hidden layer width (mlp only)")
     parser.add_argument("--data-frac", type=float, default=0.5, help="Training data fraction")
@@ -235,6 +236,42 @@ def run_rfm(args, dataset):
     return history, []
 
 
+def run_transformer(args, device):
+    dataset = make_token_dataset(
+        p=args.p, data_frac=args.data_frac, noise_level=args.noise_level,
+        operation=args.operation, pair_seed=args.pair_seed, device=device,
+    )
+    print(
+        f"Dataset: p={args.p}, operation={args.operation}, "
+        f"train={dataset['X_train'].shape[0]}, test={dataset['X_test'].shape[0]}"
+    )
+
+    torch.manual_seed(args.seed)
+    model = DecoderTransformer(
+        p=args.p, d_model=128, n_head=4, n_layer=2, dropout=args.dropout,
+    )
+    model.to(device)
+    print(f"Model: Transformer, ~{model.n_non_emb_params} non-embedding parameters")
+
+    # Original paper uses AdamW with lr=1e-3, betas=(0.9, 0.98), wd=1.0
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=args.wd,
+        betas=(0.9, 0.98), eps=1e-8,
+    )
+
+    # Transformer uses CE loss by default (classification over p tokens)
+    loss_fn = args.loss
+
+    history = train(
+        model, optimizer, dataset,
+        epochs=args.epochs, log_every=args.log_every,
+        loss_fn=loss_fn, batch_size=args.batch_size,
+        early_stop_patience=args.early_stop,
+        device=device,
+    )
+    return history, []
+
+
 def save_basic_plots(history: dict, out_dir: str):
     """Loss/accuracy plots (no weight analysis)."""
     os.makedirs(out_dir, exist_ok=True)
@@ -292,21 +329,20 @@ def main():
     device = pick_device(args.device)
     print(f"Using device: {device}")
 
-    dataset = make_dataset(
-        p=args.p,
-        data_frac=args.data_frac,
-        noise_level=args.noise_level,
-        operation=args.operation,
-        pair_seed=args.pair_seed,
-        device=device,
-    )
-    print(
-        f"Dataset: p={args.p}, operation={args.operation}, "
-        f"train={dataset['X_train'].shape[0]}, test={dataset['X_test'].shape[0]}"
-    )
-
-    history, weight_snapshots = run_mlp(args, dataset, device) if args.model == "mlp" \
-        else run_rfm(args, dataset)
+    if args.model == "transformer":
+        history, weight_snapshots = run_transformer(args, device)
+    elif args.model == "rfm":
+        history, weight_snapshots = run_rfm(args, None)
+    else:
+        dataset = make_dataset(
+            p=args.p, data_frac=args.data_frac, noise_level=args.noise_level,
+            operation=args.operation, pair_seed=args.pair_seed, device=device,
+        )
+        print(
+            f"Dataset: p={args.p}, operation={args.operation}, "
+            f"train={dataset['X_train'].shape[0]}, test={dataset['X_test'].shape[0]}"
+        )
+        history, weight_snapshots = run_mlp(args, dataset, device)
 
     # Save scalar history
     os.makedirs(args.out_dir, exist_ok=True)
