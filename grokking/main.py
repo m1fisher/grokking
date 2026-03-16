@@ -34,6 +34,9 @@ def parse_args():
     parser.add_argument("--activation", type=str, default="quadratic",
                         choices=["relu", "gelu", "tanh", "quadratic"],
                         help="Activation function")
+    parser.add_argument("--batch-size", type=int, default=0, help="Minibatch size (0 = full-batch)")
+    parser.add_argument("--early-stop", type=int, default=0,
+                        help="Stop after N consecutive log points with test_acc=1.0 (0 = off)")
     parser.add_argument("--log-every", type=int, default=10, help="Log metrics every N epochs")
     parser.add_argument("--seed", type=int, default=1, help="Model init seed")
     parser.add_argument("--pair-seed", type=int, default=420, help="Train/test split seed")
@@ -193,7 +196,9 @@ def main():
     history = train(
         model, optimizer, dataset,
         epochs=args.epochs, log_every=args.log_every,
-        loss_fn=args.loss, device=device, on_log=on_log,
+        loss_fn=args.loss, batch_size=args.batch_size,
+        early_stop_patience=args.early_stop,
+        device=device, on_log=on_log,
     )
 
     # Save scalar history

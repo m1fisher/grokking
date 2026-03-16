@@ -31,15 +31,15 @@ def eval_loss(model: nn.Module, X: torch.Tensor, Y: torch.Tensor, p: int, loss_f
 def train_step(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
-    X_train: torch.Tensor,
-    Y_train: torch.Tensor,
+    X_batch: torch.Tensor,
+    Y_batch: torch.Tensor,
     p: int,
     loss_fn: str,
 ) -> float:
-    """One full-batch gradient step. Returns training loss."""
+    """One gradient step on a batch. Returns batch loss."""
     model.train()
     optimizer.zero_grad()
-    loss = _compute_loss(model(X_train), Y_train, p, loss_fn)
+    loss = _compute_loss(model(X_batch), Y_batch, p, loss_fn)
     loss.backward()
     optimizer.step()
     return loss.item()
@@ -61,6 +61,8 @@ def train(
     epochs: int,
     log_every: int = 10,
     loss_fn: str = "mse",
+    batch_size: int = 0,
+    early_stop_patience: int = 0,
     device: torch.device = torch.device("cpu"),
     on_log: Optional[Callable[[nn.Module, int], None]] = None,
 ) -> dict:
@@ -68,6 +70,9 @@ def train(
 
     Args:
         loss_fn: "mse" or "ce" (cross-entropy).
+        batch_size: Minibatch size. 0 means full-batch.
+        early_stop_patience: Stop after this many consecutive logged epochs
+            with test_acc == 1.0. 0 disables early stopping.
         on_log: Optional callback(model, epoch) called at each log point.
 
     Returns a history dict with per-logged-epoch metrics.
@@ -80,6 +85,9 @@ def train(
 
     model.to(device)
     log_set = set(make_log_epochs(epochs, log_every))
+    n_train = X_train.shape[0]
+    full_batch = batch_size <= 0 or batch_size >= n_train
+    perfect_streak = 0
 
     history = {
         "epoch": [],
@@ -90,7 +98,19 @@ def train(
     }
 
     for epoch in range(1, epochs + 1):
-        train_loss = train_step(model, optimizer, X_train, Y_train, p, loss_fn)
+        if full_batch:
+            train_loss = train_step(model, optimizer, X_train, Y_train, p, loss_fn)
+        else:
+            # Shuffle and iterate over minibatches
+            perm = torch.randperm(n_train, device=device)
+            epoch_loss = 0.0
+            n_batches = 0
+            for i in range(0, n_train, batch_size):
+                idx = perm[i : i + batch_size]
+                batch_loss = train_step(model, optimizer, X_train[idx], Y_train[idx], p, loss_fn)
+                epoch_loss += batch_loss
+                n_batches += 1
+            train_loss = epoch_loss / n_batches
 
         if epoch in log_set:
             test_loss_val = eval_loss(model, X_test, Y_test, p, loss_fn)
@@ -111,5 +131,14 @@ def train(
                 f"train_loss={train_loss:.6f}  test_loss={test_loss_val:.6f}  "
                 f"train_acc={train_acc:.4f}  test_acc={test_acc:.4f}"
             )
+
+            if early_stop_patience > 0:
+                if test_acc >= 1.0:
+                    perfect_streak += 1
+                    if perfect_streak >= early_stop_patience:
+                        print(f"Early stopping: test_acc=1.0 for {perfect_streak} log points")
+                        return history
+                else:
+                    perfect_streak = 0
 
     return history
